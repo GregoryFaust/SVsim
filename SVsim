@@ -1,0 +1,1654 @@
+#!/usr/bin/python
+# -*- Mode: Python -*-
+
+import sys
+import traceback
+from copy import copy
+import random
+from optparse import OptionParser
+from optparse import OptionGroup
+from operator import attrgetter
+from operator import itemgetter
+import string
+import pysam
+from math import log
+from math import ceil
+
+# Stuff from cigarlib.py copied here to make SVsim self standing.
+def openInfile(parser, options, args, fileExt = None):
+    filename = options.infile;
+    if (len(args) > 0):
+        filename = args[0];
+    if   (filename == "stdin" or filename == '-'): infile = sys.stdin;
+    elif (filename is not None):                   infile = open(filename, 'r');
+    else:
+        parser.print_help();
+        sys.exit();
+    return infile;
+
+def handleException(err):
+    (foo, bar, tb) = sys.exc_info();
+    tbarr = traceback.extract_tb(tb);
+    (filename, lineno, funcname, foo) = tbarr[-1];
+    print >>sys.stderr, str(err);
+    print >>sys.stderr, "Error occurred in line", lineno, "of function", funcname, "of Python script", filename;
+    return;
+
+# Global Variables
+GlobalOptions = None;
+totalBasesOutput = 0;
+totalBEDPEentriesOutput = 0;
+fastaFile = None;
+bedpeFile = None;
+eventFile = None;
+reflib = None;
+eventList = [];
+maxSeqNameLen = 0;
+
+# Helper functions
+def complement(base):
+    try:
+        inx = "ACGTacgt".index(base);
+    except StandardError as err:
+        sys.stderr.write("Invalid base passed to complement (" + base + ")\n");
+        return base;
+    return "TGCAtgca"[inx];
+
+def ensureACGTRegion(instr, off, len):
+    for i in xrange(off, off+len):
+        base = instr[i];
+        if ("ACGTacgt".find(base) == -1):
+            return False;
+    return True;
+
+def ensureValidRegion(seq, off, len):
+    endingOff = off + len - 1;
+    if (seq is None or off < 0 or endingOff >= seq.length):
+        return False;
+    if (not ensureACGTRegion(seq.seq, off, len)):
+        return False;
+    return True;
+
+def calcOverlap(reg1, reg2):
+    # return 1 + min((reg1.rSRO + reg1.len - 1), (reg2.rSRO + reg2.len - 1)) - max(reg1.rSRO, reg2.rSRO)
+    return min((reg1.rSRO + reg1.len), (reg2.rSRO + reg2.len)) - max(reg1.rSRO, reg2.rSRO)
+
+def makeEventID(lreg, rreg):
+    eventID = ""
+    if (len(lreg.events) == 0 and len(rreg.events) == 0 and lreg.seq == rreg.seq):
+        overlap = calcOverlap(lreg, rreg);
+        if (overlap > 0):
+            eventID = lreg.seq.name + ":DUP" + str(overlap) + "::" + rreg.seq.name;
+        elif (overlap < 0):
+            eventID = lreg.seq.name + ":DEL" + str(-overlap) + "::" + rreg.seq.name;
+        return eventID;
+    if (len(lreg.events) == 0):
+        eventID += lreg.seq.name;
+    else:
+        for i in xrange(0, len(lreg.events)):
+            eventID += lreg.events[i].eventID();
+            if (i != len(lreg.events) - 1):
+                eventID += ":";
+    eventID += "::";
+    if (len(rreg.events) == 0):
+        eventID += rreg.seq.name;
+    else:
+        for i in xrange(0, len(rreg.events)):
+            eventID += rreg.events[i].eventID();
+            if (i != len(rreg.events) - 1):
+                eventID += ":";
+    return eventID;
+
+def outputReadID(contigName, contigExt):
+    fastaFile.write(">");
+    fastaFile.write(contigName)
+    fastaFile.write(contigExt)
+    fastaFile.write("\n");
+
+# Represents one sequence in the reference.
+# It will now take a num so that we can support diploid (or even aneuploid) organisms.
+class sequence (object):
+    def __init__(self, sname, slength, sstring, snum = 1):
+        self.name = sname;
+        self.length = slength;
+        self.num = snum;
+        # Temporarily keep the sequences upper case so we can compare to old output.
+        self.seq = sstring;
+        # self.seq = sstring.upper();
+        # Give the sequence an RL that covers the entire span.
+        self.RL = regionList([region(self, 0, slength)]);
+
+    def reset(self):
+        # If there is only one region, there is nothing to do.
+        if (len(self.RL.regList) != 1):
+            self.RL = regionList([region(self, 0, self.length)]);
+
+def reportRandomLocationError():
+    if (GlobalOptions.WGM and GlobalOptions.distinct):
+        raise StandardError("Unable to find valid region for event.  Overloading event density in WGM distinct mode.");
+    else:
+        raise StandardError("Unable to find valid region for event.");
+
+# The library of all reference sequences
+class refLib (object):
+    def __init__(self, filename, ploidy=1):
+        self.seqcount = 0;
+        self.seqs = [];
+        self.totalOrigLength = 0;
+        fastaIndexFile = open(filename + ".fai", 'r');
+        referenceFile  = pysam.Fastafile(filename);
+        for line in fastaIndexFile:
+            splitLine = line.split();
+            seqname = splitLine[0];
+            global maxSeqNameLen;
+            maxSeqNameLen = max(maxSeqNameLen, len(seqname));
+            seqlen = int(splitLine[1]);
+            sstring = referenceFile.fetch(seqname);
+            temp = []
+            for i in xrange(1, ploidy+1):
+                seq = sequence(seqname, seqlen, sstring, i);
+                # seq = sequence(seqname, seqlen, "", i);
+                temp.append(seq);
+            self.seqs.append(temp);
+            self.totalOrigLength += seqlen;
+            self.seqcount += 1;
+        fastaIndexFile.close();
+        referenceFile.close();
+        self.totalMutLength = self.totalOrigLength;
+
+    def printDebug(self):
+        for seqlist in self.seqs:
+            for seq in seqlist:
+                print seq.name, seq.num, seq.length;
+
+    def reset(self):
+        for seqlist in self.seqs:
+            for seq in seqlist:
+                seq.reset();
+        self.totalMutLength = self.totalOrigLength;
+
+    def getRandomRegion(self, pad, length):
+        if (GlobalOptions.WGM):
+            return self.getRandomWGMRegion(pad, length);
+        else:
+            return self.getRandomOrigRegion(pad, length);
+
+    def getRandomOrigRegion(self, pad, length):
+        for i in xrange(0, 1000):
+            off = random.randint(0, self.totalOrigLength - 1);
+            loc = self.findSeqLocation(off);
+            soff = loc.offset - pad;
+            fullLen = 2*pad + length;
+            if (ensureValidRegion(loc.seq, soff, fullLen)):
+                RL = regionList([region(loc.seq, soff, fullLen)]);
+                return (loc, RL);
+        reportRandomLocationError();
+
+    def getRandomWGMRegion(self, pad, length):
+        seqnum = 0;
+        # The following can't work until/unless each set of chroms have their own totalMutLength.
+        '''
+        if (GlobalOptions.ploidy > 1):
+            seqnum = random.randint(0, GlobalOptions.ploidy - 1);
+            print seqnum;
+        '''
+        for i in xrange(0, 1000):
+            off = random.randint(0, self.totalMutLength - 1)
+            loc = self.findRLLocation(off, seqnum);
+            soff = loc.offset - pad;
+            fulllen = 2*pad + length;
+            if (loc.seq.RL.ensureValidSegment(soff, fulllen)):
+                return (loc, loc.seq.RL);
+        reportRandomLocationError();
+
+    def getRandomLocation(self):
+        off = random.randint(0, self.totalOrigLength-1);
+        return self.findLocation(off);
+
+    def findSequence(self, seqName):
+        for seqlist in self.seqs:
+            if (seqlist[0].name == seqName):
+                return seqlist;
+        return None;
+
+    def findSeqLocation(self, offset, seqnum = 0):
+        curlen = 0;
+        for seqlist in self.seqs:
+            seq = seqlist[seqnum];
+            if (offset >= curlen and offset < curlen + seq.length):
+                return location(seq, offset - curlen);
+            curlen += seq.length;
+
+    def findRLLocation(self, offset, seqnum = 0):
+        curlen = 0;
+        for seqlist in self.seqs:
+            seq = seqlist[seqnum];
+            if (offset >= curlen and offset < curlen + seq.RL.totlen):
+                return location(seq, offset - curlen);
+            curlen += seq.RL.totlen;
+
+    def findAllLocations(self, origSeq, origOffset):
+        # For now assume no events cross sequences, so only need to look in the one we want.
+        return origSeq.RL.findAllRegLocs(origSeq, origOffset);
+        # Code for more complex case.
+        retval = [];
+        for seq in self.seqs:
+            retval.extend(seq.RL.findAllRegLocs(origSeq, origOffset));
+        return retval;
+
+    def countUniqueBreakpoints(self):
+        breaks = set();
+        for seqlist in self.seqs:
+            for seq in seqlist:
+                breaks |= seq.RL.collectUniqueBreakpoints();
+        # Unbelievable ugly way to handle inversion problem.
+        return breaks;
+        sblen = len(breaks);
+        sbreaksSeq = list(breaks);
+        sbreaksSeq.sort(key=itemgetter(1));
+        lbreak = sbreaksSeq[0];
+        ebreaksSeq = [];
+        ebreaksSeq.append(lbreak);
+        for i in xrange(1, len(sbreaksSeq)):
+            rbreak = sbreaksSeq[i];
+            if (abs(lbreak[1] - rbreak[1]) > 1):
+                ebreaksSeq.append(rbreak);
+            lbreak = rbreak;
+        eblen = len(ebreaksSeq);
+        # print sblen, eblen;
+        # for breakpoint in ebreaksSeq:
+            # print breakpoint;
+        return ebreaksSeq;
+
+    def findNextOffset(self, RL, offset):
+        startVal = 1000000000; 
+        minNext = startVal;
+        for reg in RL:
+            rsro = reg.rSRO;
+            rero = reg.rERO();
+            if (rsro > minNext):
+                break
+            if (rsro > offset and rsro < minNext):
+                minNext = rsro;
+                start = True;
+            if (rero > offset and rero < minNext):
+                minNext = rero;
+                start = False;
+        if (minNext == startVal):
+            return None;
+        '''
+        for reg in RL:
+            if (reg.rSRO == minNext and not start):
+                sys.stderr.write("Error, found starting offset that matches ending minNext.\n");
+            if (reg.rERO() == minNext and start):
+                sys.stderr.write("Error, found ending offset that matches starting minNext.\n");
+        '''
+        return (minNext, start);
+
+    def countRegionsByOffset(self, RL, offset):
+        count = 0;
+        for reg in RL:
+            if (reg.rSRO <= offset and reg.rERO() >= offset):
+                count += 1;
+        return count;
+
+    def countBigCNstates(self, minSize):
+        # Assume we will not have more than one state.
+        # We will treat this as a boolean array.
+        maxstates = 10000;
+        states = [False] * maxstates;
+        for seqlist in self.seqs:
+            # Trivial case when no edits have taken place.
+            trivial = True;
+            for seq in seqlist:
+                if (len(seq.RL.regList) != 1):
+                    trivial = False;
+                    break
+            if (trivial):
+                states[len(seqlist)] = True;
+            else:
+                # Copy the RL so we can sort it.
+                newRL = [];
+                for seq in seqlist:
+                    newRL.extend(seq.RL.regList);
+                newRL.sort(key=attrgetter('rSRO'));
+                maxOff = 0;
+                for reg in newRL:
+                    maxOff = max(maxOff, reg.rERO());
+                # Now go through and find the runs of copy number states.
+                newStates = curStates = self.countRegionsByOffset(newRL, 0);
+                curStart = 0;
+                minNext = 0;
+                runs = [];
+                while (True):
+                    while (newStates == curStates):
+                        minNextp = self.findNextOffset(newRL, minNext);
+                        if (minNextp is None):
+                            break;
+                        (minNext, start) = minNextp
+                        if (not start):
+                            minNext += 1;
+                        if (minNext <= maxOff):
+                            newStates = self.countRegionsByOffset(newRL, minNext);
+                    if (minNext - curStart >= minSize):
+                        runs.append((curStart, minNext - 1, curStates));
+                    if (minNextp is None):
+                        break;
+                    curStart = minNext;
+                    curStates = newStates;
+                # print runs;
+                for (sro, ero, count) in runs:
+                    states[count] = True;
+        # Now add up the states.
+        count = 0;
+        retval = []
+        for i in xrange(0, maxstates):
+            if (states[i]):
+                count += 1;
+                retval.append(str(i));
+                # print "state ", i
+        return retval;
+
+    def countCNstates(self):
+        # Assume we will not have more than one state.
+        # We will treat this as a boolean array.
+        maxstates = 10000;
+        states = [False] * maxstates;
+        for seqlist in self.seqs:
+            # Trivial case when no edits have taken place.
+            trivial = True;
+            for seq in seqlist:
+                if (len(seq.RL.regList) != 1):
+                    trivial = False;
+                    break
+            if (trivial):
+                states[len(seqlist)] = True;
+            else:
+                # Copy the RL so we can sort it.
+                newRL = [];
+                for seq in seqlist:
+                    newRL.extend(seq.RL.regList);
+                newRL.sort(key=attrgetter('rSRO'));
+                # Now let's go through a loop finding the next interesting offset.
+                # Then count the regions that have it.
+                # We first need to find the max offset.
+                maxOff = 0;
+                for reg in newRL:
+                    maxOff = max(maxOff, reg.rERO());
+                minNext = 0;
+                while (True):
+                    minNextp = self.findNextOffset(newRL, minNext);
+                    if (minNextp is None):
+                        break;
+                    (minNext, start) = minNextp
+                    if (start):
+                        states[self.countRegionsByOffset(newRL, minNext-1)] = True;
+                    states[self.countRegionsByOffset(newRL, minNext)] = True;
+                    if (not start and minNext != maxOff):
+                        states[self.countRegionsByOffset(newRL, minNext+1)] = True;
+        # Now add up the states.
+        count = 0;
+        retval = []
+        for i in xrange(0, maxstates):
+            if (states[i]):
+                count += 1;
+                retval.append(str(i));
+                # print "state ", i
+        return retval;
+        
+    def outputWGMdata(self):
+        for seql in self.seqs:
+            for seq in seql:
+                fastaFile.write('>' + seq.name + '\n');
+                # print "Outputing information for seq ", seq.name;
+                # seq.RL.printDebug();
+                seq.RL.outputFasta();
+                seq.RL.outputBedPE();
+
+# Represents a particular location in a sequence of the reference.
+class location (object):
+    def __init__(self, seqarg, offsetarg):
+        self.seq = seqarg;
+        self.offset = offsetarg;
+
+# A region is a location, length, and inversion bit.
+class region:
+    def __init__(self, seqarg, SRO, lenarg, invertarg=False):
+        self.seq = seqarg;
+        self.rSRO = SRO;
+        self.len = lenarg;
+        self.inverted = invertarg;
+        self.rlSRO = None;
+        self.events = [];
+
+    def copy(self):
+        newRegion = region(self.seq, self.rSRO, self.len, self.inverted);
+        newRegion.events = list(self.events);
+        return newRegion;
+
+    # This takes a region relative mutated coordinate and converts back into original coordinate.
+    def relROFF(self, offset):
+        if (self.inverted):
+            # Equivalent to ERO - offset
+            return (self.rSRO + self.len - 1) - offset;
+        else:
+            return self.rSRO + offset;
+
+    # This takes in mutated coordinate, and converts back to original coordinate.
+    def ROFF(self, offset):
+        return self.relROFF(offset - self.rSRO);
+
+    def SRO(self):
+        return self.relROFF(0);
+
+    def ERO(self):
+        return self.relROFF(self.len - 1);
+                            
+    # These just return the raw starting and ending original offsets ignoring inversions.
+    def rSRO(self):
+        return self.rSRO;
+
+    def rERO(self):
+        return self.rSRO + self.len - 1;
+                            
+    # This takes a original coordinate, and converts to a mutated coordinate.
+    def MROFF(self, offset):
+        if (self.inverted):
+            return (self.rlSRO + self.len - 1) - (offset - self.rSRO);
+        else:
+            return self.rlSRO + (offset - self.rSRO);
+
+    '''
+    def SRO(self):
+        if (self.inverted):
+            return self.rSRO + self.len - 1;
+        else:
+            return self.rSRO;
+
+    def ERO(self):
+        if (not self.inverted):
+            return self.rSRO + self.len - 1;
+        else:
+            return self.rSRO;
+    '''
+
+    def strandChar(self):
+        return ('-' if self.inverted else '+');
+
+    def outputFasta(self, soff = 0, outlen = None):
+        if (outlen is None):
+            outlen = self.len - soff;
+        global totalBasesOutput;
+        totalBasesOutput += outlen;
+        if (self.inverted):
+            ERO = self.SRO();
+            for i in xrange(soff, soff + outlen):
+                fastaFile.write(complement(self.seq.seq[ERO - i]));
+        else:
+            fastaFile.write(self.seq.seq[self.rSRO + soff:self.rSRO + soff + outlen]);
+
+    # Validate all or a portion of the region.
+    def ensureValid(self, soff = 0, rlen = None):
+        if (GlobalOptions.distinct and len(self.events) > 0):
+            return False;
+        if (rlen is None):
+            rlen = self.len - soff;
+        if (self.inverted):
+            # We don't need to do it backwards as in outputFasta.
+            # But we do need to start at the right place to go forward.
+            #  (self.rSRO + self.len - 1) - offset;
+            return ensureValidRegion(self.seq, self.relROFF(soff) + 1 - rlen, rlen);
+        else:
+            return ensureValidRegion(self.seq, self.relROFF(soff), rlen);
+
+    def printDebug(self, num = None):
+        sys.stderr.write("Region ");
+        if (num is not None):
+            sys.stderr.write("%3d " % num);
+        sys.stderr.write(("[%s:%9d:%9d - %9d | " % (self.seq.name, self.len, self.rlSRO, self.rlSRO + self.len - 1)) + 
+                         ("%s:%s:%9d:%9d - %9d]\n" % (self.seq.name, self.strandChar(), 1 + self.rERO() - self.rSRO, self.SRO(), self.ERO())));
+
+    # Notice that the next two basically do the same things, but on opposite strands.
+    # This splits itself, with new region on the left.
+    def splitLeft(self, offset):
+        # print "In splitLeft, offset=", offset, "inverted=", self.inverted;
+        if (offset == 0):
+            return None;
+        if (self.inverted):
+            offset = self.len - offset;
+            newreg = region(self.seq, self.rSRO + offset, self.len - offset, self.inverted);
+            self.len = offset;
+        else:
+            newreg = region(self.seq, self.rSRO, offset, self.inverted);
+            self.rSRO += offset;
+            self.len -= offset;
+        newreg.events = list(self.events);
+        newreg.rlSRO = self.rlSRO;
+        self.rlSRO += newreg.len;
+        return newreg;
+
+    # This splits itself with new region on the right.
+    def splitRight(self, offset):
+        # print "In splitRight, offset=", offset, "inverted=", self.inverted;
+        if (offset == self.len):
+            return None;
+        if (self.inverted):
+            offset = self.len - offset;
+            newreg = region(self.seq, self.rSRO, offset, self.inverted);
+            self.rSRO += offset;
+            self.len -= offset;
+        else:
+            newreg = region(self.seq, self.rSRO + offset, self.len - offset, self.inverted);
+            self.len = offset;
+        newreg.events = list(self.events);
+        newreg.rlSRO = self.rlSRO + self.len;
+        return newreg;
+
+
+# We will use a Python List object to store a region list.
+# So, not much in the way of structure, but a lot of methods.
+class regionList:
+    def __init__(self, initList = None):
+        if (initList is None):
+            self.empty();
+        else:
+            self.regList = initList;
+            self.resetList();
+
+    def empty(self):
+        self.regList = [];
+        self.totlen = 0;  # The total length of all the regions in the list.
+
+    def isEmpty(self):
+        return (len(self.regList) == 0);
+
+    def resetList(self):
+        curlen = 0;
+        for reg in self.regList:
+            reg.rlSRO = curlen;
+            curlen += reg.len;
+        self.totlen = curlen;
+
+    def findAllRegLocs(self, seq, offset):
+        retval = [];
+        for i in xrange(0, len(self.regList)):
+            reg = self.regList[i];
+            if (reg.seq == seq and offset >= reg.rSRO and offset <= reg.rERO()):
+                rlOffset = reg.MROFF(offset);
+                # print offset, rlOffset
+                # This assumes we will never have an event at offset zero.
+                # retval.append((location(seq, rlOffset), reg.inverted, i+1)); # Used for debug output.
+                retval.append((location(seq, rlOffset), reg.inverted));
+        return retval;
+
+    # TODO: This should be doing a binary search.
+    # Maybe Bisect can be used, but how will it know what is the comparison function?
+    def findOffset(self, offset, startinx = 0):
+        for i in xrange(startinx, len(self.regList)):
+            reg = self.regList[i];
+            if (offset >= reg.rlSRO and offset < reg.rlSRO + reg.len):
+                return (i, offset - reg.rlSRO);
+        return None;
+
+    # This is a lot like copy Segment, but we don't want to actually copy, but simply validate.
+    def ensureValidSegment(self, offset, length):
+        endingOff = offset + length - 1;
+        if (offset < 0 or endingOff >= self.totlen):
+            return False;
+        (linx, loff) = self.findOffset(offset);
+        (rinx, roff) = self.findOffset(endingOff, linx);
+        # See if we only have one region.
+        if (linx == rinx):
+            # return ensureValidRegion(self.regList[linx].seq, loff, length);
+            return self.regList[linx].ensureValid(loff, length);
+        # We have at least two regions.
+        # Start at the left and right.     
+        if (not self.regList[linx].ensureValid(loff)):
+            return False;
+        if (not self.regList[rinx].ensureValid(0, roff)):
+            return False;
+        # Do whatever is left in the middle.
+        for i in xrange(linx+1, rinx):
+            if (not self.regList[i].ensureValid()):
+                return False;
+        return True;
+        
+
+    # This will copy out a region of the regList into a new region list.
+    # This will not side effect the original.
+    # Therefore, we will do the copy first, then trim off the unwanted portions.
+    def copySegment(self, offset, length, invert = False):
+        (linx, loff) = self.findOffset(offset);
+        (rinx, roff) = self.findOffset(offset + length, linx);
+        # Copy the regions of interest into a new list.
+        newRL = regionList();
+        for i in xrange(linx, rinx+1):
+            newreg = (self.regList[i].copy());
+            newRL.append(newreg);
+        # Do the cutting.
+        # Note that is it crucial to do this before the (possible) inversion.
+        newRL.regList[-1].splitRight(roff);
+        newRL.regList[0].splitLeft(loff);
+        # Take care of optional inversion.
+        if (invert):
+            newRL.regList.reverse();
+            for newreg in newRL.regList:
+                newreg.inverted = not newreg.inverted;
+        # Set the rlSROs (although it is unclear if any of the callers will use this info).
+        # Note that since we do this for the whole new list, it will work whether we have inverted or not.
+        newRL.resetList();
+        newRL.validate("RL.copySegment");
+        return newRL;
+
+    # These are to aid debugging.
+    def validate(self, caller = ""):
+        # print "Mutated Total Length = ", reflib.totalMutLength
+        # print "Validating regionList with ", len(self.regList), " elements is ", self.totlen, " bases long.";
+        retval = True;
+        newtot = 0;
+        for reg in self.regList:
+            if (reg.rlSRO != newtot):
+                sys.stderr.write("Invalid rlSRO in regionList.  Expecting " + str(newtot) + " but found " + str(reg.rlSRO));
+                if (caller != ""):
+                    sys.stderr.write(" in " + caller);
+                sys.stderr.write('\n');
+                retval = False;
+            newtot += reg.len;
+        if (newtot != self.totlen):
+            sys.stderr.write("Invalid totlen in regionList.  Stored total is: " + str(self.totlen) + " Calculated total is: " + str(newtot));
+            if (caller != ""):
+                sys.stderr.write(" in " + caller);
+            sys.stderr.write('\n');
+            retval = False;
+        # print "regionList is valid.";
+        return retval;
+
+    def printDebug(self):
+        sys.stderr.write("Outputing regionList with " + str(len(self.regList)) + " elements is " +  str(self.totlen) + " bases long.\n");
+        count = 0;
+        for reg in self.regList:
+            count += 1;
+            reg.printDebug(count);
+        return ;
+
+############
+# Start of event routines.
+############
+
+    # This is used especially in translocation.
+    def deleteRegion(self, inx):
+        # Take out the region of interest.
+        retregion = self.regList[inx];
+        del self.regList[inx];
+        self.maybeMergeRegions(inx);
+        # Now we need to fix up the rlSROs
+        length = retregion.len;
+        for i in xrange(inx, len(self.regList)):
+            reg = self.regList[i];
+            reg.rlSRO -= length;
+        self.totlen -= length;
+        reflib.totalMutLength -= length;
+        self.validate("RL.deleteRegion");
+        return retregion;
+
+    def delete(self, offset, length, event = None):
+        linx = self.splitRegion(offset);
+        rinx = self.splitRegion(offset + length);
+        # If there is a delete event, convert the first region into the null delete region.
+        # And delete the rest of them (if any) from the RL.
+        if (event is not None):
+            delreg = self.regList[linx+1];
+            delreg.len = 0;
+            delreg.events.append(event);
+            delstart = linx + 2;
+        else:
+            delstart = linx + 1;
+        del self.regList[delstart:rinx+1];
+        self.maybeMergeRegions(linx);
+        # Fix up the trailing rlSROs
+        for i in xrange(delstart, len(self.regList)):
+            reg = self.regList[i];
+            reg.rlSRO -= length;
+        self.totlen -= length;
+        reflib.totalMutLength -= length;
+        self.validate("RL.delete");
+
+    def duplicate(self, offset, length, event = None):
+        # Copy the segment to duplicate.
+        newRL = self.copySegment(offset, length);
+        # Insert it at the correct location.
+        self.insert(offset + length, newRL, event);
+        self.validate("RL.duplicate");
+
+    def insert(self, offset, newRL, event = None):
+        # Perform a split at the insert point.
+        inx = self.splitRegion(offset);
+        # Insert this new list into yourself.
+        self.insertRL(newRL, inx + 1, event);
+        self.validate("RL.insert");
+
+    def invert(self, offset, length, event = None):
+        # Perform the splits to isolate the segment to be inverted.
+        linx = self.splitRegion(offset);
+        rinx = self.splitRegion(offset + length);
+        # First keep track of the starting rlSRO for use later during fixups.
+        nextrlSRO = self.regList[linx+1].rlSRO;
+        # We need to invert the order of the regions themselves.
+        # We do this first, so we can do the rlSRO fixups during the loop below.
+        # We need to use a temp var, because reverse does not return a value.
+        temp = self.regList[linx+1:rinx+1];
+        temp.reverse();
+        self.regList[linx+1:rinx+1] = temp;
+        # Add the events, mark regions as inverted, and correct rlSROs.
+        for reg in self.regList[linx+1:rinx+1]:
+            if (event is not None):
+                reg.events.append(event);
+            reg.inverted = not reg.inverted;
+            reg.rlSRO = nextrlSRO;
+            nextrlSRO += reg.len;
+        # These could only ever merge if the breakpoint were already at an existing breakpoint.
+        self.maybeMergeRegions(linx);
+        self.maybeMergeRegions(rinx);
+        self.validate("RL.invert");
+
+    def collectUniqueBreakpoints(self):
+        breakSet = set();
+        if (len(self.regList) < 2):
+            return breakSet;
+        lreg = self.regList[0];
+        for i in xrange(1, len(self.regList)):
+            rreg = self.regList[i];
+            if (self.checkMergeable(lreg, rreg)):
+                lreg = rreg;
+                continue;
+            lERO = lreg.ERO();
+            rSRO = rreg.SRO();
+            '''
+            # Fixups to make inversions only produce one breakpoint.
+            if (not lreg.inverted and rreg.inverted):
+                lERO += 1;
+                rSRO -= 1;
+            if (lreg.inverted and not rreg.inverted):
+                lERO += 1;
+                rSRO -= 1;
+            '''
+            # Now normalize to the genome location to avoid getting spuriously duplicate entries.
+            if (lreg.seq.name < rreg.seq.name or (lreg.seq.name == rreg.seq.name and lERO < rSRO)):
+                breakTuple = (lreg.seq.name, lERO, rreg.seq.name, rSRO);
+            else:
+                breakTuple = (rreg.seq.name, rSRO, lreg.seq.name, lERO);
+            # print breakTuple;
+            breakSet.add(breakTuple)
+            lreg = rreg;
+        return breakSet;
+        
+
+    def outputBedPE(self, eventIDarg = None):
+        if (self.isEmpty()):
+            return;
+        global totalBEDPEentriesOutput;
+        endlen = len(self.regList)
+        if (GlobalOptions.leftonly):
+            endlen = 2;
+        lreg = self.regList[0];
+        for i in xrange(1, endlen):
+            rreg = self.regList[i];
+            if (self.checkMergeable(lreg, rreg)):
+                lreg = rreg;
+                continue;
+            lERO = lreg.ERO();
+            rSRO = rreg.SRO();
+            if (eventIDarg is None):
+                eventID = makeEventID(lreg, rreg);
+            else:
+                eventID = eventIDarg;
+            totalBEDPEentriesOutput += 1;
+            bedpeFile.write('\t'.join([lreg.seq.name, str(lERO), str(lERO + 1), rreg.seq.name, str(rSRO), str(rSRO + 1),
+                                       (eventID + '::' + str(totalBEDPEentriesOutput)), str(255), lreg.strandChar(), rreg.strandChar()]));
+            bedpeFile.write('\n');
+            lreg = rreg;
+
+    def outputFasta(self, soff = 0, outlen = None):
+        if (outlen is None):
+            outlen = self.totlen;
+        # sys.stderr.write("RegionList has " + str(self.totlen) + " bases.  Writing RL[" + str(soff) + ":" + str(soff + outlen) + "]\n");
+        # Check to see if we can do this the easy way or the hard way.
+        if (soff == 0 and outlen == self.totlen):
+            for reg in self.regList:
+                reg.outputFasta();
+        else:
+            (inx, off) = self.findOffset(soff);
+            curlen = 0;
+            for i in xrange(inx, len(self.regList)):
+                reg = self.regList[i];
+                reglen = reg.len - off;
+                # sys.stderr.write(str(reglen) + '\n');
+                if (outlen - curlen < reglen):
+                    reglen = outlen - curlen;
+                # sys.stderr.write(str(reglen) + '\n');
+                reg.outputFasta(off, reglen);
+                off = 0;
+                curlen += reglen;
+                if (curlen >= outlen):
+                    break;
+        fastaFile.write('\n');
+
+############
+# Start of general side effecting routines.
+############
+
+    def append(self, region):
+        region.rlSRO = self.totlen;
+        self.totlen += region.len;
+        self.regList.append(region);
+
+    def insertRL(self, newRL, inx, event):
+        # Fix up the tail rlSROs while we still know where to start.
+        # First remember the original rlSRO
+        currlSRO = 0;
+        if (inx > 0):
+            currlSRO = self.regList[inx].rlSRO;
+        # Now fix up the tail while copying up to make room for new elements.
+        addbases = newRL.totlen;
+        addlen = len(newRL.regList);
+        selflen = len(self.regList);
+        # Expand the list so we can copy up.
+        self.regList.extend(xrange(0,addlen)); # xrange gives bogus iterable as we don't care what the values are.
+        # We need to go backwards to allow the copy up without smashing.
+        for i in xrange(selflen-1, inx-1, -1):
+            reg = self.regList[i];
+            reg.rlSRO += addbases;
+            self.regList[i+addlen] = reg;
+        self.totlen += addbases;
+        reflib.totalMutLength += addbases;
+        # Now do the insertions with rlSRO fixups as we go.
+        for i in xrange(0, addlen):
+            reg = newRL.regList[i];
+            reg.rlSRO = currlSRO;
+            currlSRO += reg.len;
+            self.regList[inx + i] = reg;
+            if (event is not None):
+                reg.events.append(event);
+        # Try to merge things back together.
+        # Start with the right one, as a merge won't effect inx.
+        self.maybeMergeRegions(inx + addlen);
+        self.maybeMergeRegions(inx);
+        self.validate("RL.insertRL");
+
+    # This will merge two adjacent regions if possible.
+    # To be mergable, the two regions must have the same seq and strandedness,...
+    #     and have to have their leftERO be one less then the rightSRO.
+    # This will attempt the merge on the region at the specified index and the one to its right.
+    def checkMergeable(self, lreg, rreg):
+        return (calcOverlap(lreg, rreg) == 0 and lreg.seq == rreg.seq and lreg.inverted == rreg.inverted)
+
+
+    def maybeMergeRegions(self, inx):
+        return False;
+        if (inx < 0 or inx >= len(self.regList) - 1):
+            return False;
+        lreg = self.regList[inx];
+        rreg = self.regList[inx + 1];
+        if (calcOverlap(lreg, rreg) == 0 and lreg.seq == rreg.seq and lreg.inverted == rreg.inverted):
+            # print "Merging regions ", inx, " and ", inx+1
+            # lreg.printDebug()
+            # rreg.printDebug()
+            # print calcOverlap(lreg, rreg);
+            eventlist = list(set(rreg.events).intersection(lreg.events));
+            # eventlist = list(set(rreg.events).union(lreg.events));
+            if (lreg.inverted):
+                rreg.len += lreg.len;
+                rreg.events = eventlist;
+                rreg.rlSRO = lreg.rlSRO;
+                del self.regList[inx];
+            else:
+                lreg.len += rreg.len;
+                lreg.events = eventlist;
+                del self.regList[inx + 1];
+            return True;
+        return False;
+
+    # This splits the region to the left of the offset.
+    def splitRegion(self, offset):
+        (inx, off) = self.findOffset(offset);
+        reg = self.regList[inx];
+        newreg = reg.splitLeft(off);
+        if (newreg is not None):
+            self.regList.insert(inx, newreg);
+            self.validate("splitRegion");
+            return inx;
+        else:
+            return inx - 1;
+
+# Represents a simulated SV event.
+class simpleLocationEvent (object):
+    def __init__(self, typeArg, seqNamearg, SROarg, EROarg, strand1arg = None, strand2arg = None):
+        self.origtype = typeArg;
+        self.type = typeArg;
+        self.seqlist = reflib.findSequence(seqNamearg);
+        if (self.seqlist is None):
+            sys.stderr.write(self.type + " event sequence name " + seqNamearg + " not found in reference library.\n");
+            return None;
+        self.rSRO = SROarg;
+        self.rERO = EROarg;
+        self.strand1 = strand1arg;
+        self.strand2 = strand2arg;
+
+    def setID(self, count, format):
+        self.id = None;
+
+    def eventID(self):
+        return self.id;
+
+    def findClosest(self, tlocp, splist):
+        (tloc, rev) = tlocp;
+        minDist = 1e20;
+        for pair in splist:
+            (sloc, rev) = pair;
+            dist = abs(sloc.offset - tloc.offset)
+            if (dist < minDist):
+                minDist = dist;
+                minPair = pair;
+        return minPair;
+
+    def performWGMEventSeq(self, seq):
+        # print self.rSRO, self.rERO, self.rERO - self.rSRO;
+        # print "Performing ", self.type, str(self.len), " Event in WGM Mode.";
+        # Find locations for the SRO and ERO and pick from among them.
+        SROlocs = reflib.findAllLocations(seq, self.rSRO);
+        if (len(SROlocs) == 0):
+            # print self.rSRO;
+            # seq.RL.printDebug()
+            return False;
+        EROlocs = reflib.findAllLocations(seq, self.rERO);
+        if (len(EROlocs) == 0):
+            # print self.rERO;
+            # seq.RL.printDebug()
+            return False;
+
+        # Pick the loc to use.
+        # Three schemes are supported.
+        # 1) Pick nonrandomly always picking the one first in the mutated chrom.
+        # 2) Pick the location for each end randomly and totally independently.
+        # 3) Pick from the end with the fewest choices, then pick the other end to be the closest point.
+        if (GlobalOptions.select == "F"):
+            slocp = SROlocs[0];
+            elocp = EROlocs[0];
+        elif (GlobalOptions.select == "I"):
+            # Old scheme.  Pick them totally at random.
+            if (len(SROlocs) == 1):
+                slocp = SROlocs[0];
+            else:
+                slocp = random.choice(SROlocs);
+            if (len(EROlocs) == 1):
+                elocp = EROlocs[0];
+            else:
+                elocp = random.choice(EROlocs);
+        elif (GlobalOptions.select == "C"):
+            # New scheme.  Pick closest ones.
+            # Start with them at None just to make sure we will get an error if the cascade is not right.
+            slocp = None;
+            elocp = None;
+            lSROlocs = len(SROlocs);
+            lEROlocs = len(EROlocs);
+            if (lSROlocs == 1):
+                # We have no choice on 1.
+                slocp = SROlocs[0];
+                if (lEROlocs == 1):
+                    # The 1+1 case.
+                    elocp = EROlocs[0];
+                else:
+                    # The 1+n case.
+                    elocp = self.findClosest(slocp, EROlocs);
+            elif (lEROlocs == 1):
+                # We have no choice on 2.
+                elocp = EROlocs[0];
+                # The 1+1 case handled above, so we don't need to check here.
+                # The n+1 case.
+                slocp = self.findClosest(elocp, SROlocs);
+            else:
+                # The n+n case
+                # Pick from the smaller list first?
+                if (lSROlocs < lEROlocs):
+                    slocp = random.choice(SROlocs);
+                    elocp = self.findClosest(slocp, EROlocs);
+                elif (lEROlocs < lSROlocs):
+                    elocp = random.choice(EROlocs);
+                    slocp = self.findClosest(elocp, SROlocs);
+                else:
+                    # Both equal lengths
+                    # Flip a coin to decide which to sample.
+                    coin = random.randint(0,1);
+                    if (coin == 0):
+                        slocp = random.choice(SROlocs);
+                        elocp = self.findClosest(slocp, EROlocs);
+                    else:
+                        elocp = random.choice(EROlocs);
+                        slocp = self.findClosest(elocp, SROlocs);
+        else:
+            raise StandardError("Invalid endpoint select mode: " + GlobalOptions.select);
+        
+        (sloc, sinv) = slocp;
+        (eloc, einv) = elocp;
+
+        # If we have the strand info, we want to do the crazy event transform from the Stephens code.
+        if (self.strand1 is not None and self.strand2 is not None):
+            slocstrand = '+';
+            if (sinv):
+                slocstrand = '-';
+            elocstrand = '+';
+            if (einv):
+                elocstrand = '-';
+            if (slocstrand == self.strand1 and elocstrand != self.strand2):
+                self.type = "DELL"
+            elif (slocstrand != self.strand1 and elocstrand == self.strand2):
+                self.type = "DUPL"
+            else:
+                self.type = "INVL"
+
+        if (sloc.offset > eloc.offset):
+            temp = slocp;
+            slocp = elocp;
+            elocp = temp;
+        (sloc, sinv) = slocp;
+        (eloc, einv) = elocp;
+
+        if (self.type == "INCL"):
+            length = self.iloc.seq.length;
+        else:
+            length = 1 + eloc.offset - sloc.offset;
+        # print
+        # print self.type, "Region%d" % (sloc.offset), "through Region%d" % (eloc.offset);
+        t1 = seq.RL.totlen;
+        # It's debatable what the id should be for these events.
+        # self.id = self.type + ":" + str(length) + ":" + seq.name + ":" + str(sloc.offset) + "_" + str(eloc.offset);
+        self.id = self.type + ":" + str(length) + ":" + seq.name + ":" + str(self.rSRO) + "_" + str(self.rERO);
+        # Now perform the event.
+        if (self.type == "DELL"):
+            seq.RL.delete(sloc.offset, length, self);
+        elif (self.type == "DUPL"):
+            seq.RL.duplicate(sloc.offset, length, self);
+        elif (self.type == "INVL"):
+            seq.RL.invert(sloc.offset, length, self);
+        elif (self.type == "INCL"):
+            IRL = regionList([region(self.iloc.seq, self.iloc.offset, self.iloc.seq.length - self.iloc.offset, False)]);
+            seq.RL.insert(sloc.offset, IRL, self);
+        t2 = seq.RL.totlen;
+        t3 = max(t1, t2) - min(t1, t2);
+        if (self.type != "INVL" and t3 != length):
+            sys.stderr.write(self.type + ":" + str(sloc.offset) + "-" + str(sloc.offset + length - 1) + 
+                             " event length is " + str(length) + " chrome changed by " + str(t3) + "\n");
+            seq.RL.printDebug();
+        return True;
+
+    def performWGMEvent(self):
+        chromorder = range(0, len(self.seqlist));
+        if (GlobalOptions.select != "F"):
+            random.shuffle(chromorder);
+        for i in chromorder:
+            seq = self.seqlist[i];
+            if (self.performWGMEventSeq(seq)):
+                return i+1;
+        return 0;
+
+# Represents a simulated SV event.
+class simpleEvent (object):
+    def __init__(self, typeArg, lenarg):
+        self.type = typeArg;
+        self.len = lenarg;
+        self.id = "";
+
+    def setID(self, count, format):
+        self.id = self.type + format % count;
+
+    def eventID(self):
+        return self.id;
+
+    def outputEvent(self, file):
+        (sinx, soff) = self.RL.findOffset(self.loc.offset);
+        (einx, eoff) = self.RL.findOffset(self.loc.offset + self.len -1);
+        sreg = self.RL.regList[sinx];
+        ereg = self.RL.regList[einx];
+        file.write('\t'.join([self.eventID(), self.type, str(self.len), self.loc.seq.name, str(self.loc.offset),
+                              sreg.seq.name, str(sreg.relROFF(soff)), sreg.strandChar(),
+                              ereg.seq.name, str(ereg.relROFF(eoff)), ereg.strandChar()]));
+        file.write('\n');
+
+    def performWGMEvent(self):
+        # print "Performing ", self.type, str(self.len), " Event in WGM Mode.";
+        # Now get a regionList for a random region
+        (self.loc, self.RL) = reflib.getRandomWGMRegion(GlobalOptions.padding, self.len);
+        self.outputEvent(eventFile)
+        if (self.type == "DEL"):
+            self.RL.delete(self.loc.offset, self.len, self);
+        elif (self.type == "DUP"):
+            self.RL.duplicate(self.loc.offset, self.len, self);
+        elif (self.type == "INV"):
+            self.RL.invert(self.loc.offset, self.len, self);
+
+    def formContigBase(self, loc):
+        # Make the base part of the read ID.
+        padding = GlobalOptions.padding;
+        startingOff = loc.offset - padding;
+        fullLen = 2*padding + self.len;
+        self.contigName = ":".join([loc.seq.name, (str(startingOff) + '_' + str(startingOff+fullLen-1)), self.type,
+                                    (str(loc.offset) + '_' + str(loc.offset + self.len-1))]);
+
+    def performContigEvent(self):
+        # print "Performing ", self.type, " Event in Contig Mode.";
+        # Now get a regionList for a random region
+        (self.loc, self.RL) = reflib.getRandomOrigRegion(GlobalOptions.padding, self.len);
+        self.formContigBase(self.loc);
+        if (self.type == "DEL"):
+            self.performDeleteEvent();
+        elif (self.type == "DUP"):
+            self.performDuplicateEvent();
+        elif (self.type == "INV"):
+            self.performInvertEvent()
+
+    # These will implement the actual events.
+    def performDeleteEvent(self):
+        self.RL.delete(GlobalOptions.padding, self.len);
+        # For delete, the output is always the same.  Only the readID is different.
+        if (self.len <= GlobalOptions.maxcontig):
+            outputReadID(self.contigName, ":FC");
+        else:
+            outputReadID(self.contigName, ":BP");
+        self.RL.outputFasta();
+        # Output the bedpe entry.
+        self.RL.outputBedPE(self.contigName);
+
+    def performDuplicateEvent(self):
+        self.RL.duplicate(GlobalOptions.padding, self.len);
+        # Duplication is unlike the other events in that there is only one breakpoint.
+        # And there is essentially no overlap in what is output in the BP vs FC cases.
+        # Do we output it as a single contig, or two ends?
+        if (self.len <= GlobalOptions.maxcontig):
+            outputReadID(self.contigName, ":FC");
+            self.RL.outputFasta();
+        else:
+            outputReadID(self.contigName, ":BP");
+            self.RL.outputFasta(self.len, 2 * GlobalOptions.padding);
+        # Output the bedpe entry.
+        self.RL.outputBedPE(self.contigName);
+
+    def performInvertEvent(self):
+        padding = GlobalOptions.padding;
+        self.RL.invert(padding, self.len);
+        # Do we output it as a single contig, or two ends?
+        if (self.len <= GlobalOptions.maxcontig):
+            outputReadID(self.contigName, ":FC");
+            self.RL.outputFasta();
+        else:
+            outputReadID(self.contigName, ":LBP");
+            # If padding is greater than length, we need to be careful with the event portion of the contigs.
+            outLen = min(padding, self.len);
+            self.RL.outputFasta(0, padding + outLen);
+            if (not GlobalOptions.leftonly):
+                # Now write out the query id for the second breakpoint.
+                outputReadID(self.contigName, ":RBP");
+                # Now include the first half of the second breakpoint.
+                self.RL.outputFasta(padding + self.len - outLen, padding + outLen);
+        # Output the bedpe entry.
+        self.RL.outputBedPE(self.contigName);
+
+
+class insertEvent (simpleEvent):
+
+    def __init__(self, typeArg, lenarg, slocarg = None, strandarg='+', extraStringarg=''):
+        self.type = typeArg;
+        self.len = lenarg;
+        self.sloc = slocarg;
+        self.strand = strandarg;
+        self.extraString = extraStringarg
+
+    def outputEvent(self, file):
+        file.write('\t'.join([self.eventID(), self.type, str(self.len), self.loc.seq.name, str(self.loc.offset),
+                              self.IRL.regList[0].seq.name, str(self.IRL.regList[0].SRO()), self.IRL.regList[0].strandChar(), 
+                              self.IRL.regList[-1].seq.name, str(self.IRL.regList[-1].ERO()), self.IRL.regList[-1].strandChar()]));
+        file.write('\n');
+
+    def performWGMEvent(self):
+        # print "Performing ", self.type, str(self.len), " Event in WGM Mode.";
+        (self.loc, self.RL) = reflib.getRandomWGMRegion(GlobalOptions.padding, 0);
+        if (self.sloc is None):
+            # If the sloc has not been defined by the input, we want to insert a random segment of the mutated genome.
+            (self.sloc, self.IRL) = reflib.getRandomWGMRegion(0, self.len);
+            # We need to look for the segment to copy in the place where it came from!
+            # self.IRL = self.loc.seq.RL.copySegment(self.sloc.offset, self.len, (random.randint(0, 1) == 0));
+            self.IRL = self.IRL.copySegment(self.sloc.offset, self.len, (random.randint(0, 1) == 0));            
+        else:
+            # If the sloc has been defined by the user, we want to insert the segment from the original genome.
+            if (not ensureValidRegion(self.sloc.seq, self.sloc.offset, self.len)):
+                sys.stderr.write("INS event location " + str(self.sloc.offset) + " not within specified sequence " + self.sloc.seq.name + '\n');
+                return;
+            self.IRL = regionList([region(self.sloc.seq, self.sloc.offset, self.len, (self.strand == '-'))]);
+        self.outputEvent(eventFile)
+        self.RL.insert(self.loc.offset, self.IRL, self);
+
+    def formContigBase(self, loc, sloc):
+        # Make the base part of the read ID.
+        padding = GlobalOptions.padding;
+        startingOff = loc.offset - padding;
+        fullLen = 2*padding;
+        self.contigName = ":".join([loc.seq.name, (str(startingOff) + '_' + str(startingOff+fullLen-1)), self.type, ("AT" + '_' + str(startingOff+padding)), \
+                                    sloc.seq.name, (str(sloc.offset) + '_' + str(sloc.offset+self.len-1) + '_' + self.strand)]);
+        # Handle the "extra_string" separately to avoid an extra "_" in the output if it is empty string.
+        if (self.extraString != ""):
+            self.contigName += "_" + self.extraString;
+
+    def performContigEvent(self):
+        # print "Performing ", self.type, " Event in Contig Mode.";
+        # Unlike other events, the recipient region start out with just the paddding.
+        padding = GlobalOptions.padding;
+        (loc, self.RL) = reflib.getRandomOrigRegion(padding, 0);
+        if (self.sloc is None):
+            (self.sloc, self.IRL) = reflib.getRandomOrigRegion(0, self.len);
+        else:
+            if (not ensureValidRegion(self.sloc.seq, self.sloc.offset, self.len)):
+                sys.stderr.write("INS event location " + str(self.sloc.offset) + " not within specified sequence " + self.sloc.seq.name + '\n');
+                return;
+            self.IRL = regionList([region(self.sloc.seq, self.sloc.offset, self.len, (self.strand == '-'))]);
+
+        self.RL.insert(padding, self.IRL);
+        self.formContigBase(loc, self.sloc)
+
+        # Do we output it as a single contig, or two ends?
+        if (self.len <= GlobalOptions.maxcontig):
+            outputReadID(self.contigName, ":FC");
+            self.RL.outputFasta();
+        else:
+            outputReadID(self.contigName, ":LBP");
+            # If padding is greater than length, we need to be careful with the event portion of the contigs.
+            outLen = min(padding, self.len);
+            self.RL.outputFasta(0, padding + outLen);
+            if (not GlobalOptions.leftonly):
+                # Now write out the query id for the second breakpoint.
+                outputReadID(self.contigName, ":RBP");
+                # Now include the first half of the second breakpoint.
+                self.RL.outputFasta(padding + self.len - outLen, padding + outLen);
+        # Output the bedpe entry.
+        self.RL.outputBedPE(self.contigName);
+
+
+class translocEvent (simpleEvent):
+    def __init__(self, typeArg):
+        self.type = typeArg;
+
+    # def performWGMEvent(self):
+
+
+    def performContigEvent(self):
+        # We need to find two regions on different sequences.
+        # We only need paddings worth on each side, as this event has no "length" associated with it.
+        padding = GlobalOptions.padding;
+        (self.loc1, self.RL1) = reflib.getRandomOrigRegion(padding, 0);
+        while (True):
+            (self.loc2, self.RL2) = reflib.getRandomOrigRegion(padding, 0);
+            if (self.loc2.seq != self.loc1.seq):
+                break;
+
+        # Split the regions into four parts.
+        self.RL1.splitRegion(padding);
+        self.RL2.splitRegion(padding);
+        self.RL1.printDebug();
+        self.RL2.printDebug();
+        # Now decide which chunk goes with which chunk
+        # We arbitrarily pick 0 to mean that they will ligate in the + + (X) configuration.
+        # Otherwise, they will be ligated in the + - (][) configuration.
+        if (False): # (random.randint(0, 1) == 0)):
+            end1 = self.RL1.deleteRegion(1);
+            end2 = self.RL2.deleteRegion(1);
+            self.RL1.printDebug();
+            self.RL2.printDebug();
+            self.RL1.append(end2);
+            self.RL2.append(end1);
+        else:
+            end1 = self.RL1.deleteRegion(1);
+            start2 = self.RL2.deleteRegion(0);
+            start2.inverted = not start2.inverted;
+            self.RL1.append(start2);
+            self.RL2.regList[0].inverted = not self.RL2.regList[0].inverted;
+            self.RL2.append(end1);
+        self.RL1.printDebug();
+        self.RL2.printDebug();
+        return;
+
+
+def handleEvent(event):
+    if (event is None):
+        return;
+    if (GlobalOptions.WGM):
+        global eventList;
+        eventList.append(event);
+    else:
+        event.performContigEvent();
+
+def simulateSV():
+    usage = "Usage: %prog -i <SV events file> -r <indexed reference file> -o <outputFileRoot> [options]\nAuthor: Greg Faust";
+    parser = OptionParser(usage=usage);
+
+    superGroup = OptionGroup(parser, "This parameter controls whether the program is in Whole Genome Mode or Contig Mode.\n  The default is Contig Mode.\n  In Contig Mode, each event is independent and applied to the unaltered genome.\n  In WGM, events are no longer independent of one another.\n  Events are executed in random order against the modified genome.\n  The entire modified genome is output at the end.\n  Simulation commands ending in 'L' are only available in WGM.");
+    parser.add_option_group(superGroup);
+    superGroup.add_option("-W", dest="WGM", default=False, action="store_true", help="Turn on Whole Genome Mode.");
+
+    loopGroup = OptionGroup(parser, "This parameter controls which type of simulation is done.\n  'Simulate' is the default, and just creates simulation events in either Contig of Whole Genome mode.\n  'Bins' and 'Probability' repeatedly do simulations that apply events and count breakpoints and copy number states.\n  'Bins' will fill bins define by a range of the count of breakpoints, and keep going until the bins each have 'repeat' number of entries.");
+    # parser.add_option_group(loopGroup);
+    loopGroup.add_option("--loop", dest="loop", help="Loop structure.  B=Bins, D=Debug, P=Probability, S=Simulate", metavar="{B|D|P|S}", default="S");
+
+    reqGroup = OptionGroup(parser, "These parameters are required in both Whole Genome and Contig modes.");
+    parser.add_option_group(reqGroup);
+    reqGroup.add_option("-i", dest="infile", help="input file of SV events or 'stdin'", metavar="FILE");
+    reqGroup.add_option("-r", dest="reference", help="indexed reference fasta file", metavar="FILE");
+    reqGroup.add_option("-o", dest="outfileRoot", help="root for output fasta and bedpe files", metavar="FILEROOT");
+
+    WGMGroup = OptionGroup(parser, "These parameters apply only in Whole Genome Mode:");
+    parser.add_option_group(WGMGroup);
+    WGMGroup.add_option("-d", dest="distinct", default=False, action="store_true", help="Every event will be in a Distinct region.");
+    WGMGroup.add_option("--select", dest="select", help="'L' commands endpoint selection strategy. [F=First], C=Close, I=Independent", metavar="{F|C|I}", default="F");
+
+    probGroup = OptionGroup(parser, "These parameters apply only when using loop types 'Bins' or 'Probability':");
+    # parser.add_option_group(probGroup);
+    probGroup.add_option("--maxchromlen", dest="maxchromlen", help="max size of a chrom to accept run", metavar="INT", type="int", default=5e9);
+    probGroup.add_option("--minseg", dest="minseg", help="min size of CN seg to count", metavar="INT", type="int", default=10000);
+    probGroup.add_option("--ploidy", dest="ploidy", help="number of copies of each chromosome.", metavar="INT", type="int", default=1);
+
+    contigGroup = OptionGroup(parser, "These parameters apply only in Contig Mode");
+    parser.add_option_group(contigGroup);
+    contigGroup.add_option("-c", dest="maxcontig", help="max length of SV events before output only breakpoints [500]", metavar="INT", type="int", default=500);
+    contigGroup.add_option("-l", dest="leftonly", default=False, action="store_true", help="INS/INV events output only left breakpoint and bedpe entry.");
+    contigGroup.add_option("-p", dest="padding", help="padding to add to each end of SV and CGR contigs [500]", metavar="INT", type="int", default=500);
+
+    mainGroup = OptionGroup(parser, "These parameters apply to the operation of the program as a whole.");
+    parser.add_option_group(mainGroup);
+    mainGroup.add_option("-n", dest="repeat", help="number of repeat events to create for each line of input [1]", metavar="INT", type="int", default=1);
+    mainGroup.add_option("-s", dest="seed", help="random number generator seed [0X7FFFFFFF]", metavar="INT", type="int", default=0X7FFFFFFF);
+
+    global GlobalOptions;
+    (GlobalOptions, args) = parser.parse_args();
+
+    # Fix up options depending on mode.
+    GlobalOptions.select = GlobalOptions.select.upper();
+    GlobalOptions.loop = GlobalOptions.loop.upper();
+
+    if (GlobalOptions.loop ==  "S"):
+        # The code can't handle diploid genomes until we can solve the totalMutLength issue.
+        GlobalOptions.ploidy = 1;
+    else:
+        # The simulation loops require WGM mode.
+        GlobalOptions.WGM = True;
+
+    # Set things for WGM or not.
+    if (GlobalOptions.WGM):
+        # This option makes no sense in WGM.
+        GlobalOptions.leftonly = False;
+    else:
+        # Neither of these make sense in Contig Mode.
+        GlobalOptions.distinct = False;
+        GlobalOptions.ploidy = 1;
+
+    # Open the input file.
+    infile = openInfile(parser, GlobalOptions, args);
+    sys.stderr.write("Processing " + infile.name + "\n");
+
+    # Set up the reference library.
+    global reflib;
+    if (GlobalOptions.reference is None):
+        myError("Reference File argument is Missing", parser);
+    reflib = refLib(GlobalOptions.reference, GlobalOptions.ploidy);
+    print >>sys.stderr, "Input", reflib.seqcount, "sequences totaling", reflib.totalOrigLength, "bases";
+
+    # Set up the random number generator
+    random.seed(GlobalOptions.seed);
+    
+    # Process input file.
+    fastaFileName = GlobalOptions.outfileRoot + ".fasta";
+    bedpeFileName = GlobalOptions.outfileRoot + ".bedpe";
+    eventFileName = GlobalOptions.outfileRoot + ".event";
+    pad = GlobalOptions.padding;
+    maxcontig = GlobalOptions.maxcontig;
+    leftonly = GlobalOptions.leftonly;                    
+
+    for line in infile:
+        if (line[0] == '#'):
+            continue;
+        s = line.strip().split('\t');
+        op = s[0];
+        for i in xrange(0, GlobalOptions.repeat):
+            # Delete, Duplicate, InsertRandom and Invert all have the same arguments.
+            if (op == "DEL" or op == "DUP" or op == "INR" or op == "INV"):
+                startlen = int(s[1]);
+                inc = 1;
+                endlen = startlen + inc;
+                # If there are more than 1 argument, the rest are like the 2nd and 3rd arguments to xrange.
+                # Except the ending length is included.
+                if (len(s) >= 4):
+                    inc = int(s[3]);
+                    endlen = int(s[2]) + inc;
+                for oplen in xrange(startlen, endlen, inc):
+                    if (op == "INR"):
+                        e = insertEvent(op, oplen);
+                    else:
+                        e = simpleEvent(op, oplen);
+                    handleEvent(e);
+            # Delete, Duplicate, InsertRandom and Invert all have the same arguments.
+            if (op == "DELL" or op == "DUPL" or op == "INVL" or op == "INSL" or op == "INCL"):
+                tseqname = s[1];
+                tSRO = int(s[2]);
+                tERO = int(s[3]);
+                if (op == "INCL"):
+                    e = simpleLocationEvent(op, tseqname, tSRO, tERO);
+                    seqstring = s[4];
+                    seqlen = len(seqstring);
+                    seqname = "LITERAL"
+                    if (len(s) > 5):
+                        seqname = s[5];
+                    seq = sequence(seqname, seqlen, seqstring);
+                    e.iloc = location(seq, 0);
+                elif (len(s) == 4):
+                    e = simpleLocationEvent(op, tseqname, tSRO, tERO);
+                else:
+                    e = simpleLocationEvent(op, tseqname, tSRO, tERO, s[4], s[5]);
+                handleEvent(e);
+                # It makes no sense to do these multiple times.
+                break;
+            # Translocation
+            elif (op == "TL1" or op == "TL2"):
+                # These don't really work yet.
+                break;
+                # Unlike other events, translocation can only occur if we have at least two sequences in reflib.
+                if (len(reflib.seqs) < 2):
+                    sys.stderr.write("Attempt to perform translocation on reference containing less than 2 sequences.\n");
+                    continue;
+                e = translocEvent(op);
+                handleEvent(e);
+            # Insert.
+            elif (op == "INS"):
+                sseqname = s[1];
+                sSRO = int(s[2]);
+                sERO = int(s[3]);
+                strand = s[4];
+                if (len(s) > 5):
+                    extraString = s[5];
+                else:
+                    extraString = "";
+                oplen = 1 + sERO - sSRO;
+                seq = reflib.findSequence(sseqname);
+                if (seq is None):
+                    sys.stderr.write("INS event sequence name " + sseqname + " not found in reference library.\n");
+                    continue;
+                sloc = location(seq, sSRO);
+                e = insertEvent(op, oplen, sloc, strand, extraString);
+                handleEvent(e);
+                # success = performInsertEvent(fastaFile, bedpeFile, loc, sloc, oplen, pad, maxcontig, leftonly, "INS", strand, extra_string);
+            # Insert Constant.
+            elif (op == "INC"):
+                seqstring = s[1];
+                seqlen = len(seqstring);
+                seqname = "LITERAL"
+                if (len(s) > 2):
+                    seqname = s[2];
+                seq = sequence(seqname, seqlen, seqstring);
+                sloc = location(seq, 0);
+                e = insertEvent(op, seqlen, sloc, '.');
+                handleEvent(e);
+                # success = performInsertEvent(fastaFile, bedpeFile, loc, sloc, seqlen, pad, maxcontig, leftonly, "INC");
+
+    # print "Starting to perform events"
+    if (len(eventList) == 0):
+        sys.stderr.write("No events in " + infile.name + "\n"); 
+        return;
+    # We support various loops for different things!!
+    if (GlobalOptions.loop == "S"):
+        # Simulate the events through once and output fasta and bedpe.
+        # That is, the original SVsim functionality.
+        random.shuffle(eventList);
+        global eventFile;
+        eventIdDigits = int(ceil(log(len(eventList) + 1, 10)));
+        eventIdFormat = "%0" + str(eventIdDigits) + "d"
+        count = 1;
+        with open(eventFileName, 'w') as eventFile:
+            for e in eventList:
+                e.setID(count, eventIdFormat);
+                count += 1;
+                e.performWGMEvent();
+        global bedpeFile;
+        global fastaFile;
+        with open(fastaFileName, 'w') as fastaFile:
+            with open(bedpeFileName, 'w') as bedpeFile:
+                reflib.outputWGMdata();
+
+        sys.stderr.write("Output " + str(totalBasesOutput) + " total bases to " + fastaFileName +'\n');
+        sys.stderr.write("Output " + str(totalBEDPEentriesOutput) + " total BEDPE entries to " + bedpeFileName +'\n');
+        
+
+    elif (GlobalOptions.loop == "D"):
+        # Special simple loop to just run through once with no randomness and output a BUNCH of stuff.
+        count = 0;
+        failCount = 0;
+        maxChromLen = 0;
+        for e in eventList:
+            count += 1;
+            chrom = e.performWGMEvent();
+            if (chrom == 0):
+                failCount += 1;
+                print count, e.seqlist[0].name, e.rSRO, e.rERO, e.strand1, e.strand2, "Failed", failCount;
+                continue;
+            chromRL = e.seqlist[chrom-1].RL;
+            chromLen = chromRL.totlen;
+            maxChromLen = max(chromLen, maxChromLen);
+            breaks = reflib.countUniqueBreakpoints();
+            numbreaks = len(breaks);
+            states = reflib.countCNstates();
+            numstates = len(states);        
+            print count, e.seqlist[0].name, e.type, e.rSRO, e.rERO, e.strand1, e.strand2, "Succeeded", failCount, chromLen, maxChromLen, numbreaks, numstates, states
+            chromRL.printDebug();
+            print
+
+    elif (GlobalOptions.loop == "P"):
+        # Loop for doing probability runs.
+        totout = 0;
+        totiter = 0;
+        totbins = len(eventList);
+        countsperbin = GlobalOptions.repeat;
+        binwidth = 1;
+        breakbins = [0] * totbins;
+        for i in xrange(totbins-1,totbins):
+            # Use following for no failed events at the criteria.
+            while (totout < GlobalOptions.repeat): 
+            # Use the following for correct number of breakpoints as the criteria.
+            # while (breakbins[i] < countsperbin):
+                totiter += 1;
+                failCount = 0;
+                count = 0;
+                maxChromLen = [0] * GlobalOptions.ploidy;
+                for e in eventList:
+                    count += 1;
+                    chrom = e.performWGMEvent();
+                    if (chrom == 0):
+                        failCount += 1;
+                        # print e.origtype, e.type, e.rSRO, e.rERO, e.strand1, e.strand2
+                        # continue if using the nmber of breakpoints as the determiner.
+                        # continue;
+                        # break if requiring that there are no failed events.
+                        break;
+                    maxChromLen[chrom-1] = max(e.seqlist[chrom-1].RL.totlen, maxChromLen[chrom-1]);
+                    if (max(maxChromLen) > GlobalOptions.maxchromlen):
+                        sys.stderr.write("Max chrom length " + str(max(maxChromLen)) + " exceeds limit " + str(GlobalOptions.maxchromlen) + "\n");
+                        break;
+                    if (count == len(eventList)):
+                        breaks = reflib.countUniqueBreakpoints();
+                        binnum = (len(breaks)-1)/binwidth;
+                        # The below for using the number of breakpoints as the determiner
+                        # if (binnum >= totbins or binnum < totbins-1 or breakbins[binnum] == countsperbin):
+                            # continue;
+                        # breakbins[binnum] = breakbins[binnum] + 1;
+                        totout += 1;
+                        states = reflib.countBigCNstates(GlobalOptions.minseg);
+                        print "\t".join([str(totout), str(binnum), str(totiter), str(len(breaks)), str(len(states)), str(failCount)]);
+                        sys.stdout.flush();
+                random.shuffle(eventList);
+                reflib.reset();
+
+
+    elif (GlobalOptions.loop == "B"):
+        # Loop for doing bin runs for plots.
+        totout = 0;
+        totiter = 0;
+        binwidth = 1;
+        countsperbin = GlobalOptions.repeat;
+        # The last few bins tend to be VERY hard to fill.
+        # totbins = int(((0.95 * len(eventList))/binwidth) + 0.5);
+        totbins = int(((len(eventList))/binwidth) + 0.5);
+        sys.stderr.write("Filling " + str(totbins) + " bins.\n");
+        breakbins = [0] * totbins;
+        binrange = range(1,binwidth*totbins + 1, binwidth);
+        for i in xrange(1,totbins):
+            while (breakbins[i] < countsperbin):
+                totiter += 1;
+                failCount = 0;
+                count = 0;
+                maxChromLen = [0] * GlobalOptions.ploidy;
+                for e in eventList:
+                    count += 1;
+                    chrom = e.performWGMEvent();
+                    if (chrom == 0):
+                        failCount += 1;
+                        continue;
+                    maxChromLen[chrom-1] = max(e.seqlist[chrom-1].RL.totlen, maxChromLen[chrom-1]);
+                    breaks = reflib.countUniqueBreakpoints();
+                    numbreaks = len(breaks);
+                    if (numbreaks >= binrange[i] and numbreaks < (binrange[i] + binwidth)):
+                        binnum = (numbreaks-1)/binwidth;
+                        breakbins[binnum] = breakbins[binnum] + 1;
+                        totout += 1;
+                        states = reflib.countBigCNstates(GlobalOptions.minseg);
+                        print "\t".join([str(totout), str(binnum), str(totiter), str(numbreaks), str(len(states)), str(failCount), str(max(maxChromLen))]);
+                        sys.stdout.flush();
+                        break;
+                    if (max(maxChromLen) > GlobalOptions.maxchromlen):
+                        sys.stderr.write("Max chrom length " + str(max(maxChromLen)) + " exceeds limit " + str(GlobalOptions.maxchromlen) + "\n");
+                        break;
+                random.shuffle(eventList);
+                reflib.reset();
+    else:
+        raise StandardError("Invalid loop type: " + GlobalOptions.loop);
+
+    return;
+    return;
+
+
+def main():
+    try:
+        simulateSV();
+    except IOError as err:
+        sys.stderr.write("IOError " + str(err) + '\n');
+        return;
+    except StandardError as err:
+        sys.stderr.write("StandardError\n");
+        handleException(err);
+        sys.exit(1);
+
+if __name__ == "__main__":
+    sys.exit(main())
+    (END)
