@@ -83,7 +83,7 @@ INC baseSequence [contigName]                   - INsert Constant base sequence 
 
 **Commands to create SVs at specified original offset locations:**  
 These commands all end in "L" for "Location".
-They specify the offset in original offsets at which to create the SV of the specified type.
+They specify the location, in original offsets, at which to create the SV of the specified type.
 In *WGM* the original offsets are backed mapped into mutated offsets to locate potential regions to act upon.
 In addition, there can be multiple locations in the mutated genomes for the specified target location due to prior insertions or tandem duplications.
 In such cases, the *--select* option controls how the mutated offsets are selected from among the possible options (See below).
@@ -93,7 +93,7 @@ Also, it makes no sense to do these events multiple times, so they ignore the *r
 DELL startOffset endOffset - DELete the region between the Locations selected for the offsets.
 DUPL startOffset endOffset - DUPlicate the region between the Locations selected for the offsets.
 INVL startOffset endOffset - INVert the region between the Locations selected for the offsets.
-INCL startOffset endOffset baseSequence [contigName] - INSert the specified base sequence at the Location selected for the offsets.
+INCL startOffset endOffset baseSequence [contigName] - INSert Constant base sequence at the Location selected for the offsets.
 ```
 
 
@@ -108,10 +108,28 @@ In this mode, the entire mutated genome is output to the **fasta** file.
 In *contig* mode, each simulated SV will be independent of each other, while in *WGM* the simulated SVs will not be independent if they fall near each other in the mutated genome.
 The **-W** option specifies that *WGM* will be used.
 
+---
+**Options:**  
+Defaults are shown in brackets [].
+```
+This parameter controls whether the program is in Whole Genome Mode or Contig Mode.
+    -W                Turn on Whole Genome Mode.
 
+These parameters are required in both Whole Genome and Contig modes.:
+    -i FILE           input file of SV events or 'stdin'
+    -r FILE           indexed reference fasta file
+    -o FILEROOT       root for output fasta and bedpe files
 
+These parameters apply only in Whole Genome Mode::
+    -d                Every event will be in a Distinct region.
+    --select={F|C|I}  'L' commands endpoint selection strategy. [F=First], C=Close, I=Independent
 
+These parameters apply only in Contig Mode:
+    -c INT            max length of SV events before output only breakpoints [500]
+    -l                INC/INR/INS/INV events output only left breakpoint and bedpe entry.
+    -p INT            padding to add to each end of SV and CGR contigs [500]
 
-
-
-
+These parameters apply to the operation of the program as a whole.:
+    -n INT            number of repeat events to create for each line of input [1]
+    -s INT            random number generator seed [0X7FFFFFFF]
+```
