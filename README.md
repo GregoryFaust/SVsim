@@ -71,9 +71,9 @@ DUP startLength [endLength] [increment] - Create tandem DUPlication(s) as descri
 INV startLength [endLength] [increment] - Create in-place INVersion(s) as described above.
 INR startLength [endLength] [increment] - Create INsertions from a Random source region.  Each instance has a new source.
 ```
-**Two additional ommands to create Insertions at random target locations:**  
+**Two additional commands to create Insertions at random target locations:**  
 ```
-INS startOffset endOffset strand [contigSuffix] - INSert source region specified by original offsets at random target location.
+INS seqName startOffset endOffset strand [contigSuffix] - INSert source region specified by original offsets at random target location.
                                                   strand is {+|-}
                                                   contigSuffix is appended to contig name (e.g. "Alu" or whatever)
 INC baseSequence [contigName]                   - INsert Constant base sequence at random target location.
@@ -86,14 +86,14 @@ These commands all end in "L" for "Location".
 They specify the location, in original offsets, at which to create the SV of the specified type.
 In *WGM* the original offsets are backed mapped into mutated offsets to locate potential regions to act upon.
 In addition, there can be multiple locations in the mutated genomes for the specified target location due to prior insertions or tandem duplications.
-In such cases, the *--select* option controls how the mutated offsets are selected from among the possible options (See below).
+In such cases, the *--select* option controls how the mutated offsets are selected from among the possible offsets (See below).
 For both the above reasons, the length of the resultant SV may not be related to (endOffset - startOffset).
 Also, it makes no sense to do these events multiple times, so they ignore the *repeat* option.
 ```
-DELL startOffset endOffset - DELete the region between the Locations selected for the offsets.
-DUPL startOffset endOffset - DUPlicate the region between the Locations selected for the offsets.
-INVL startOffset endOffset - INVert the region between the Locations selected for the offsets.
-INCL startOffset endOffset baseSequence [contigName] - INSert Constant base sequence at the Location selected for the offsets.
+DELL seqName startOffset endOffset - DELete the region between the Locations selected for the offsets.
+DUPL seqName startOffset endOffset - DUPlicate the region between the Locations selected for the offsets.
+INVL seqName startOffset endOffset - INVert the region between the Locations selected for the offsets.
+INCL seqName startOffset endOffset baseSequence [contigName] - INSert Constant base sequence at the Location selected for the offsets.
 ```
 
 
