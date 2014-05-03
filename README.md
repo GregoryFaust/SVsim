@@ -47,6 +47,7 @@ In what follows, we will use the following terms:
 * Target Location: The genomic point at which an SV is created.  It falls between two bases.
 * Original Offset: Location coordinates relative to the original genome.
 * Mutated Offset:  Location coordinates relative to the mutated genome.
+* SRO, ERO: Starting and Ending (original) reference offset, respectively.
 
 ---
 **Simulation Language:**  
@@ -73,11 +74,11 @@ INR startLength [endLength] [increment] - Create INsertions from a Random source
 ```
 **Two additional commands to create Insertions at random target locations:**  
 ```
-INS seqName startOffset endOffset strand [contigSuffix] - INSert source region specified by original offsets at random target location.
-                                                  strand is {+|-}
-                                                  contigSuffix is appended to contig name (e.g. "Alu" or whatever)
-INC baseSequence [contigName]                   - INsert Constant base sequence at random target location.
-                                                  contigName will specify name of sequence.  Defaults to "LITERAL".
+INS seqName SRO ERO strand [contigSuffix] - INSert source region specified by original offsets at random target location.
+                                            strand is {+|-}
+                                            contigSuffix is appended to contig name (e.g. "Alu" or whatever)
+INC baseSequence [contigName]             - INsert Constant base sequence at random target location.
+                                            contigName will specify name of sequence.  Defaults to "LITERAL".
                                                   
 ```
 
@@ -90,13 +91,11 @@ In such cases, the *--select* option controls how the mutated offsets are select
 For both the above reasons, the length of the resultant SV may not be related to (endOffset - startOffset).
 Also, it makes no sense to do these events multiple times, so they ignore the *repeat* option.
 ```
-DELL seqName startOffset endOffset - DELete the region between the Locations selected for the offsets.
-DUPL seqName startOffset endOffset - DUPlicate the region between the Locations selected for the offsets.
-INVL seqName startOffset endOffset - INVert the region between the Locations selected for the offsets.
-INCL seqName startOffset endOffset baseSequence [contigName] - INSert Constant base sequence at the Location selected for the offsets.
+DELL seqName SRO ERO - DELete the region between the Locations selected for the offsets.
+DUPL seqName SRO ERO - DUPlicate the region between the Locations selected for the offsets.
+INVL seqName SRO ERO - INVert the region between the Locations selected for the offsets.
+INCL seqName SRO ERO baseSequence [contigName] - INSert Constant base sequence at the Location selected for the offsets.
 ```
-
-
 
 ---
 **Major Modes:**  
