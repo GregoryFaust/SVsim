@@ -49,6 +49,30 @@ In what follows, we will use the following terms:
 * Mutated Offset:  Location coordinates relative to the mutated genome.
 
 ---
+**Simulation Language:**  
+
+**Commands to create SVs at random target locations:**   
+These commands allow for the specification of a range of event lengths for the SV of choice in a similar fashion as loop indices specification except that the endLength will also be used.  That is, the loop condition will have the effect of this pseudocode:
+```
+len = <em>startLength</em>
+while (len <= endLength)
+do
+  create specified event type of length len.
+  len = len + increment
+end
+```
+If *endLength* is not specified, it defaults to the value of startLength (i.e. one event will be created).  
+If *increment* is not specified, it will defaults to 1.  
+The total number of events created will also be effected by the value of the *repeat* option.  (See below).
+```
+DEL startLength [endLength] [increment] - create deletion(s) as described above.
+DUP startLength [endLength] [increment] - create tandem duplication(s) as described above.
+INV startLength [endLength] [increment] - create in-place inversion(s) as described above.
+INR startLength [endLength] [increment] - create insertions from a random source region.  Each instance has a new source.
+```
+
+
+---
 **Major Modes:**  
 SVsim operates in two major modes that largely control what is output in the **fasta** file, but there are also mode specific options that further control how SVs are simulated.
 The default mode is called *contig* mode.
