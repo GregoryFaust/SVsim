@@ -52,9 +52,10 @@ In what follows, we will use the following terms:
 **Simulation Language:**  
 
 **Commands to create SVs at random target locations:**   
-These commands allow for the specification of a range of event lengths for the SV of choice in a similar fashion as loop indices specification except that the endLength will also be used.  That is, the loop condition will have the effect of this pseudocode:
+These commands allow for the specification of a range of event lengths for the SV of choice in a similar fashion as loop indices specification except that the endLength will also be used.
+That is, the loop condition will have the effect of this pseudocode:
 ```
-len = <em>startLength</em>
+len = startLength
 while (len <= endLength)
 do
   create specified event type of length len.
@@ -65,11 +66,36 @@ If *endLength* is not specified, it defaults to the value of startLength (i.e. o
 If *increment* is not specified, it will defaults to 1.  
 The total number of events created will also be effected by the value of the *repeat* option.  (See below).
 ```
-DEL startLength [endLength] [increment] - create deletion(s) as described above.
-DUP startLength [endLength] [increment] - create tandem duplication(s) as described above.
-INV startLength [endLength] [increment] - create in-place inversion(s) as described above.
-INR startLength [endLength] [increment] - create insertions from a random source region.  Each instance has a new source.
+DEL startLength [endLength] [increment] - Create DELetion(s) as described above.
+DUP startLength [endLength] [increment] - Create tandem DUPlication(s) as described above.
+INV startLength [endLength] [increment] - Create in-place INVersion(s) as described above.
+INR startLength [endLength] [increment] - Create INsertions from a Random source region.  Each instance has a new source.
 ```
+**Two additional ommands to create Insertions at random target locations:**  
+```
+INS startOffset endOffset strand [contigSuffix] - INSert source region specified by original offsets at random target location.
+                                                  strand is {+|-}
+                                                  contigSuffix is appended to contig name (e.g. "Alu" or whatever)
+INC baseSequence [contigName]                   - INsert Constant base sequence at random target location.
+                                                  contigName will specify name of sequence.  Defaults to "LITERAL".
+                                                  
+```
+
+**Commands to create SVs at specified original offset locations:**  
+These commands all end in "L" for "Location".
+They specify the offset in original offsets at which to create the SV of the specified type.
+In *WGM* the original offsets are backed mapped into mutated offsets to locate potential regions to act upon.
+In addition, there can be multiple locations in the mutated genomes for the specified target location due to prior insertions or tandem duplications.
+In such cases, the *--select* option controls how the mutated offsets are selected from among the possible options (See below).
+For both the above reasons, the length of the resultant SV may not be related to (endOffset - startOffset).
+Also, it makes no sense to do these events multiple times, so they ignore the *repeat* option.
+```
+DELL startOffset endOffset - DELete the region between the Locations selected for the offsets.
+DUPL startOffset endOffset - DUPlicate the region between the Locations selected for the offsets.
+INVL startOffset endOffset - INVert the region between the Locations selected for the offsets.
+INCL startOffset endOffset baseSequence [contigName] - INSert the specified base sequence at the Location selected for the offsets.
+```
+
 
 
 ---
