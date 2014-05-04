@@ -122,6 +122,10 @@ These parameters are required in both Whole Genome and Contig modes.:
 These parameters apply only in Whole Genome Mode::
     -d                Every event will be in a Distinct region.
     --select={F|C|I}  'L' commands endpoint selection strategy. [F=First], C=Close, I=Independent
+                      First: independently find the first place in the mutated genome where each original offset occurs.
+                      Close: randomly choose a mutated offset for the original offset that has the fewest mutated offsets,
+                             then pick the mutated offset for the other original offset that is closest to the first.
+                      Independent: randomly choose from among the mutated offsets independently for each original offset.
 
 These parameters apply only in Contig Mode:
     -c INT            max length of SV events before output only breakpoints [500]
