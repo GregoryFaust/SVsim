@@ -64,7 +64,7 @@ do
 end
 ```
 If *endLength* is not specified, it defaults to the value of startLength (i.e. one event will be created).  
-If *increment* is not specified, it will defaults to 1.  
+If *increment* is not specified, it defaults to 1.  
 The total number of events created will also be effected by the value of the *repeat* option.  (See below).
 ```
 DEL startLength [endLength] [increment] - Create DELetion(s) as described above.
