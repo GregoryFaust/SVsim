@@ -89,6 +89,7 @@ In *WGM* the original offsets are backed mapped into mutated offsets to locate p
 In addition, there can be multiple locations in the mutated genomes for the specified target location due to prior insertions or tandem duplications.
 In such cases, the *--select* option controls how the mutated offsets are selected from among the possible offsets (See below).
 For both the above reasons, the length of the resultant SV may not be related to (endOffset - startOffset).
+If there is NO location in the mutated genome for a specified original offset due to a previous deletion, then the command will fail, and no SV will be created.
 Also, it makes no sense to do these events multiple times, so they ignore the *repeat* option.
 ```
 DELL seqName SRO ERO - DELete the region between the Locations selected for the offsets.
@@ -115,7 +116,7 @@ This parameter controls whether the program is in Whole Genome Mode or Contig Mo
     -W                Turn on Whole Genome Mode.
 
 These parameters are required in both Whole Genome and Contig modes.:
-    -i FILE           input file of SV events or 'stdin'
+    -i FILE           input file of SV event commands or 'stdin'
     -r FILE           indexed reference fasta file
     -o FILEROOT       root for output fasta and bedpe files
 
