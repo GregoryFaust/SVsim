@@ -1394,7 +1394,7 @@ def simulateSV():
     # Set up the reference library.
     global reflib;
     if (GlobalOptions.reference is None):
-        myError("Reference File argument is Missing", parser);
+        myError("Reference File (-r) argument is Missing", parser);
     reflib = refLib(GlobalOptions.reference, GlobalOptions.ploidy);
     print >>sys.stderr, "Input", reflib.seqcount, "sequences totaling", reflib.totalOrigLength, "bases";
 
@@ -1402,6 +1402,8 @@ def simulateSV():
     random.seed(GlobalOptions.seed);
     
     # Process input file.
+    if (GlobalOptions.outfileRoot is None):
+        myError("Output File Root (-o) argument is Missing", parser);
     fastaFileName = GlobalOptions.outfileRoot + ".fasta";
     bedpeFileName = GlobalOptions.outfileRoot + ".bedpe";
     eventFileName = GlobalOptions.outfileRoot + ".event";
@@ -1412,7 +1414,7 @@ def simulateSV():
     for line in infile:
         if (line[0] == '#'):
             continue;
-        s = line.strip().split('\t');
+        s = line.strip().split();
         op = s[0];
         for i in xrange(0, GlobalOptions.repeat):
             # Delete, Duplicate, InsertRandom and Invert all have the same arguments.
