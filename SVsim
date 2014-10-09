@@ -1406,7 +1406,14 @@ def simulateSV():
         myError("Output File Root (-o) argument is Missing", parser);
     fastaFileName = GlobalOptions.outfileRoot + ".fasta";
     bedpeFileName = GlobalOptions.outfileRoot + ".bedpe";
-    eventFileName = GlobalOptions.outfileRoot + ".event";
+    eventFileName = GlobalOptions.outfileRoot + ".event"; 
+    global bedpeFile;
+    global fastaFile;
+    if (not GlobalOptions.WGM):
+        fastaFile = open(fastaFileName, 'w');
+        bedpeFile = open(bedpeFileName, 'w');
+
+
     pad = GlobalOptions.padding;
     maxcontig = GlobalOptions.maxcontig;
     leftonly = GlobalOptions.leftonly;                    
@@ -1496,6 +1503,14 @@ def simulateSV():
                 handleEvent(e);
                 # success = performInsertEvent(fastaFile, bedpeFile, loc, sloc, seqlen, pad, maxcontig, leftonly, "INC");
 
+    # Handle contig mode.
+    if (not GlobalOptions.WGM):
+        fastaFile.close();
+        bedpeFile.close();
+        sys.stderr.write("Output " + str(totalBasesOutput) + " total bases to " + fastaFileName +'\n');
+        sys.stderr.write("Output " + str(totalBEDPEentriesOutput) + " total BEDPE entries to " + bedpeFileName +'\n');
+        return;
+
     # print "Starting to perform events"
     if (len(eventList) == 0):
         sys.stderr.write("No events in " + infile.name + "\n"); 
@@ -1514,8 +1529,6 @@ def simulateSV():
                 e.setID(count, eventIdFormat);
                 count += 1;
                 e.performWGMEvent();
-        global bedpeFile;
-        global fastaFile;
         with open(fastaFileName, 'w') as fastaFile:
             with open(bedpeFileName, 'w') as bedpeFile:
                 reflib.outputWGMdata();
@@ -1636,7 +1649,6 @@ def simulateSV():
     else:
         raise StandardError("Invalid loop type: " + GlobalOptions.loop);
 
-    return;
     return;
 
 
