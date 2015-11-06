@@ -1482,10 +1482,12 @@ def simulateSV():
                 else:
                     extraString = "";
                 oplen = 1 + sERO - sSRO;
-                seq = reflib.findSequence(sseqname);
-                if (seq is None):
+                seqList = reflib.findSequence(sseqname);
+                if (seqList is None):
                     sys.stderr.write("INS event sequence name " + sseqname + " not found in reference library.\n");
                     continue;
+                # findSequence returns a list. Since they will all have the same original coordinates, just pick the first.
+                seq = seqList[0];
                 sloc = location(seq, sSRO);
                 e = insertEvent(op, oplen, sloc, strand, extraString);
                 handleEvent(e);
