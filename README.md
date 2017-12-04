@@ -8,12 +8,12 @@ Written by Greg Faust (gf4ea@virginia.edu)
 
 SVsim is written in Python 2.6+, and requires [pysam](https://code.google.com/p/pysam/).  It has been tested on both Linux and OSX. It has not been tested with Python versions 3.0 or higher.
 
-##Summary
+## Summary
 A Structural Variant (SV) is any genomic insertion, deletion, duplication, inversion or translocation of 50 bases or more in length.
 
 *SVsim* is a tool to simulate Structural Variant calls in order to generate sythetic benchmark data useful to test/evaluate SV calling pipelines.  For example, it has been used to generate test datasets for both [YAHA](http://faculty.virginia.edu/irahall/yaha/) and [LUMPY](https://github.com/arq5x/lumpy-sv).
 
-##Installation
+## Installation
 *SVsim* is a self contained Python source file and requires no special installation beyond **python** and **pysam**.
 However, we strongy suggest that you have [bedtools](https://github.com/arq5x/bedtools2) and [samtools](http://samtools.sourceforge.net/) installed.
 In addition, it is common to use [wgsim](https://github.com/lh3/wgsim) to simulate sequencing reads from the **fasta** file that *SVsim* produces.
@@ -25,7 +25,7 @@ git clone git://github.com/GregoryFaust/SVsim.git
 cp SVsim/SVsim /usr/local/bin/
 ~~~~~~~~~~~~~~~~~~
 
-##Usage
+## Usage
 *SVsim* requires input of a reference genome as an indexed fasta file (for example using **samtools faidx**).
 The Structural Variants to create are specified in an input file using a simple declarative language described below.  Output includes a [fasta](http://en.wikipedia.org/wiki/FASTA_format) file in which the created SVs are embedded, a [bedpe](http://bedtools.readthedocs.org/en/latest/content/general-usage.html) file that specify the breakpoint coordinates in the input genome, and a *event* file that gives additional information about the SV events that were created.
 
@@ -50,7 +50,7 @@ In what follows, we will use the following terms:
 * SRO, ERO: Starting and Ending (original) reference offset, respectively.
 
 ---
-####Simulation Language:  
+#### Simulation Language:  
 
 **Commands to create SVs at random target locations:**   
 These commands allow for the specification of a range of event lengths for the SV of choice in a similar fashion as loop indices specification except that the endLength will also be used.
